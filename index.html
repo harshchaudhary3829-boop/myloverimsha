@@ -1,0 +1,275 @@
+<title>Rimsha's Ring</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one phone-shaped column. Top = live render, bottom = the page typing its own source. */
+:root {
+  --bg: #050507;
+  --fg: #d9dbe3;
+  --dim: #5d6070;
+  --faint: #2a2c36;
+  --accent: #ff5a7a;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--mono);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  overflow: hidden;
+}
+#app { display: flex; flex-direction: column; height: 100%; max-width: 520px; margin: 0 auto; }
+#stage { position: relative; flex: 1.35; min-height: 0; cursor: pointer; }
+#cv { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.hud { position: absolute; font-size: 10px; line-height: 1.5; color: var(--dim); letter-spacing: .02em; pointer-events: none; }
+#time { top: 12%; right: 0; color: var(--accent); }
+#time::before { content: ""; display: inline-block; width: 5px; height: 5px; background: var(--accent); margin-right: 6px; vertical-align: middle; }
+#info { left: 0; bottom: 8px; }
+#bar { display: flex; justify-content: space-between; font-size: 10px; color: var(--dim); padding: 8px 0; border-top: 1px solid var(--faint); }
+#bar b { color: var(--fg); font-weight: 500; }
+#code {
+  flex: 1; min-height: 0; overflow: hidden; margin: 0; padding: 12px 0 8px;
+  font: 400 11.5px/20px var(--mono); color: var(--fg); white-space: pre;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 88%, transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 22%, #000 88%, transparent 100%);
+}
+.ln { display: block; padding-left: 38px; position: relative; opacity: .8; }
+.ln::before { content: attr(data-n); position: absolute; left: 0; width: 28px; text-align: right; color: var(--dim); }
+.ln.hl { opacity: 1; background: linear-gradient(90deg, rgba(255,90,122,.14), transparent 70%); box-shadow: inset 2px 0 0 var(--accent); }
+.cm { color: var(--dim); }
+.cur { display: inline-block; width: 7px; height: 14px; background: var(--accent); vertical-align: -2px; animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .cur { animation: none; } }
+</style>
+
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="time" class="hud">t 0.00s</div>
+    <div id="info" class="hud"></div>
+  </div>
+  <div id="bar"><span><b>$</b> ring.html</span><span id="st">running</span></div>
+  <pre id="code"></pre>
+</div>
+
+<script id="main">
+// ───────── 1. Geometry: build the ring as a cloud of 3D points ─────────
+// Every point stores a position p, a surface normal n (for lighting),
+// an "order" (0..1, when it appears during the draw-in), and a kind.
+const TAU = Math.PI * 2, rnd = Math.random;
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const norm = v => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0]/l, v[1]/l, v[2]/l]; };
+
+const BAND = 0, PRONG = 1, GEM = 2, DUST = 3, ORBIT = 4, NAME = 5;
+const R_BAND = 1.0, BAND_W = 0.07, BAND_Z = 0.12;          // ring radius, band thickness, band width
+const CULET_Y = 1.07, GIRDLE_Y = 1.30, TABLE_Y = 1.46;      // diamond heights
+const GIRDLE_R = 0.30, TABLE_R = 0.17, FACETS = 16;
+const pts = [];
+const add = (p, n, order, kind, extra) => pts.push(Object.assign(
+  { p, n, order, kind, seed: rnd(), j: [rnd()-.5, rnd()-.5, rnd()-.5] }, extra));
+
+// background specks and three tilted orbit rings (drawn first, so they sit behind)
+for (let i = 0; i < 320; i++) {
+  const r = 1.5 + rnd() * 1.3, a = rnd() * TAU, z = rnd() * 2 - 1, s = Math.sqrt(1 - z*z);
+  add([r*s*Math.cos(a), r*z*1.1, r*s*Math.sin(a)], null, rnd() * .6, DUST);
+}
+[[1.75, .5], [1.95, -.7], [2.15, 1.1]].forEach(([rad, tilt], k) => {
+  for (let i = 0; i < 130; i++) add([0,0,0], null, .05 * i / 130, ORBIT, { rad, tilt, th: rnd() * TAU, sp: .25 + k*.12 });
+});
+
+// band: a squashed torus. u = angle round the ring, v = angle round the tube
+for (let i = 0; i < 2800; i++) {
+  const u = rnd() * TAU, v = rnd() * TAU, r = R_BAND + BAND_W * Math.cos(v);
+  const p = [r*Math.cos(u), r*Math.sin(u), BAND_Z * Math.sin(v)];
+  const n = norm([Math.cos(v)/BAND_W*Math.cos(u), Math.cos(v)/BAND_W*Math.sin(u), Math.sin(v)/BAND_Z]);
+  const d = Math.abs(((u + Math.PI/2 + Math.PI) % TAU + TAU) % TAU - Math.PI);  // distance from the bottom
+  add(p, n, .5 * d / Math.PI, BAND);                         // the band draws from the bottom upward
+}
+// four prongs: thin tubes from the band up to the diamond's girdle
+for (let k = 0; k < 4; k++) {
+  const a = TAU * (k + .5) / 4, c = Math.cos(a), s = Math.sin(a);
+  for (let i = 0; i < 70; i++) {
+    const t = rnd(), f = rnd() * TAU, q = norm([c*Math.cos(f), Math.sin(f), s*Math.cos(f)]);
+    const x = .09 + .21*t, y = 1.03 + .31*t;
+    add([x*c + .022*q[0], y + .022*q[1], x*s + .022*q[2]], q, .5 + .18*t, PRONG);
+  }
+}
+// diamond: crown (cone up to the table), pavilion (cone down to the culet), flat table.
+// Normals are snapped to 16 facets and tilted alternately, which is what makes it sparkle.
+const facet = a => { const k = Math.floor(a / TAU * FACETS); return [(k + .5) * TAU / FACETS, k % 2 ? .22 : -.22]; };
+const gemOrder = y => .68 + .32 * (y - CULET_Y) / (TABLE_Y - CULET_Y);   // the diamond fills from its tip up
+for (let i = 0; i < 1300; i++) {                                         // crown
+  const a = rnd() * TAU, s = rnd(), r = GIRDLE_R + (TABLE_R - GIRDLE_R) * s, y = GIRDLE_Y + (TABLE_Y - GIRDLE_Y) * s;
+  const [ac, tilt] = facet(a);
+  add([r*Math.cos(a), y, r*Math.sin(a)], norm([.16*Math.cos(ac), .13 + tilt*.5, .16*Math.sin(ac)]), gemOrder(y), GEM);
+}
+for (let i = 0; i < 1000; i++) {                                         // pavilion
+  const a = rnd() * TAU, s = Math.sqrt(rnd()), r = GIRDLE_R * s, y = CULET_Y + (GIRDLE_Y - CULET_Y) * s;
+  const [ac, tilt] = facet(a);
+  add([r*Math.cos(a), y, r*Math.sin(a)], norm([.23*Math.cos(ac), -.30 + tilt*.4, .23*Math.sin(ac)]), gemOrder(y), GEM);
+}
+for (let i = 0; i < 260; i++) {                                          // table
+  const a = rnd() * TAU, r = TABLE_R * Math.sqrt(rnd());
+  add([r*Math.cos(a), TABLE_Y, r*Math.sin(a)], [0, 1, 0], gemOrder(TABLE_Y), GEM);
+}
+
+// her name: draw the text on a hidden canvas, then turn the lit pixels into points.
+// It floats inside the ring, always facing you, and appears once the ring is drawn.
+const NAME_TEXT = "Rimsha";                       // change this to any name
+{
+  const c = document.createElement("canvas"); c.width = 520; c.height = 130;
+  const g = c.getContext("2d");
+  g.font = "italic 700 104px Georgia, 'Times New Roman', serif";
+  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#fff";
+  g.fillText(NAME_TEXT, 260, 68);
+  const px = g.getImageData(0, 0, 520, 130).data, STEP = 4;
+  for (let y = 0; y < 130; y += STEP) for (let x = 0; x < 520; x += STEP) {
+    if (px[(y * 520 + x) * 4 + 3] < 140) continue;
+    const u = (x - 260) / 260;                     // -1 .. 1 across the name
+    add([u * .95, -(y - 65) / 260 * 1.3 - .05, 0], null, .96 + .2 * (u + 1) / 2, NAME,
+        { ch: Math.floor(rnd() * 6) });            // each dot is one of the letters R I M S H A
+  }
+}
+
+// ───────── 2. Letters: pre-draw each glyph once, then stamp them ─────────
+const RAMP = "ilrcvxzseomwWM";                 // dim → dense; brightness picks the letter
+const CELL = 32;
+function atlas(color, set = RAMP) {
+  const c = document.createElement("canvas"); c.width = CELL * set.length; c.height = CELL;
+  const g = c.getContext("2d");
+  g.font = "700 26px ui-monospace, Menlo, Consolas, monospace";
+  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = color;
+  [...set].forEach((ch, i) => g.fillText(ch, i * CELL + CELL / 2, CELL / 2 + 1));
+  return c;
+}
+const ATLAS = [atlas("#e9eaf2"), atlas("#e9eaf2"), atlas("#cfe5ff"), atlas("#8b90a3"), atlas("#7c8296")];
+const NAME_ATLAS = atlas("#ffa6bd", "RIMSHA");
+
+// ───────── 3. Render loop: draw-in sweep, rotation, lighting ─────────
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+let W = 0, H = 0, dpr = 1;
+function resize() {
+  dpr = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+}
+new ResizeObserver(resize).observe(cv); resize();
+
+const DRAW_S = 6;                                  // seconds the sweep takes
+const KEY = norm([0, .8, .6]), VIEW = [0, 0, 1];   // key light and camera direction
+const half = (L) => norm([L[0] + VIEW[0], L[1] + VIEW[1], L[2] + VIEW[2]]);
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+let t0 = performance.now(), last = t0, fps = 30, letters = 0;
+const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function frame(now) {
+  const t = (now - t0) / 1000;
+  fps += ((1000 / Math.max(1, now - last)) - fps) * .05; last = now;
+  const head = t / DRAW_S * 1.08;                  // the "drawing light" moving through order 0..1
+  const yaw = .5 + t * (still ? .08 : .7), pitch = .22 + .1 * Math.sin(t * .5);
+  const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const RIM = norm([Math.cos(t * .9), .5, Math.sin(t * .9)]), HK = half(KEY), HR = half(RIM);
+  const S = Math.min(H * .29, W * .36), K = S / 150, cx = W / 2, cyy = H * .5;
+
+  const view = (v, withYaw) => {                   // rotate a vector into camera space
+    let x = v[0], y = v[1], z = v[2];
+    if (withYaw) { const x2 = x*cy + z*sy; z = -x*sy + z*cy; x = x2; }
+    return [x, y*cp - z*sp, y*sp + z*cp];
+  };
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#050507"; ctx.fillRect(0, 0, W, H);
+  const flares = []; letters = 0;
+
+  for (const o of pts) {
+    const vis = clamp((head - o.order) / .06);
+    if (vis <= 0) continue;
+    let p, n = null, b, size;
+    if (o.kind === ORBIT) {                        // orbit dots circle on a tilted plane
+      const th = o.th + t * o.sp, ct = Math.cos(o.tilt), st = Math.sin(o.tilt);
+      const x = o.rad * Math.cos(th), y = 0, z = .5 * o.rad * Math.sin(th);
+      p = view([x*ct - y*st, x*st + y*ct, z], false);
+      b = .2 + .2 * Math.sin(th * 3 + t) ** 2; size = 3.6;
+    } else if (o.kind === DUST) {                  // drifting specks that twinkle
+      p = view(o.p, false);
+      p[0] += Math.sin(t * .3 + o.seed * 20) * .06;
+      b = .08 + .45 * Math.sin(t * 2 + o.seed * 40) ** 4; size = 3.6;
+    } else if (o.kind === NAME) {                  // her name: soft pulse that travels left to right
+      p = view([o.p[0], o.p[1] + .02 * Math.sin(t * 1.2 + o.p[0] * 2), 0], false);
+      b = .8 + .3 * Math.sin(t * 2 - o.p[0] * 3); size = 3.4;
+    } else {
+      p = view(o.p, true); n = view(o.n, true);
+      if (n[2] < -.15 && o.kind !== PRONG) continue;            // skip faces turned away
+      const d1 = Math.max(0, dot(n, KEY)), d2 = Math.max(0, dot(n, RIM));
+      const sh = o.kind === GEM ? 18 : 8;
+      const s1 = Math.pow(Math.max(0, dot(n, HK)), sh), s2 = Math.pow(Math.max(0, dot(n, HR)), sh);
+      if (o.kind === GEM) {
+        b = .22 + .5*d1 + .6*d2 + .9*(s1 + s2) + .55 * Math.pow(Math.max(0, Math.sin(t*4 + o.seed*60)), 10);
+        b *= .62; size = 5.2;
+        if (b > .75 && o.seed > .85 && flares.length < 40) flares.push(o);
+      } else { b = (.08 + .45*d1 + .35*d2 + .5*s1 + .4*s2) * .8; size = o.kind === PRONG ? 4 : 5.6; }
+      const edge = head - o.order;
+      if (edge > 0 && edge < .05) b += .8;                      // bright at the leading edge of the sweep
+    }
+    const k = (1 - vis) ** 2 * 1.2;                // points start scattered, then snap into place
+    p = [p[0] + o.j[0]*k, p[1] + o.j[1]*k, p[2] + o.j[2]*k];
+    b *= vis; if (b < .05) continue;
+    const f = 5 / (5 - p[2]);                      // perspective
+    const sx = cx + p[0] * S * f, sy2 = cyy - (p[1] - .2) * S * f;
+    const isName = o.kind === NAME;
+    const idx = isName ? o.ch : Math.min(RAMP.length - 1, Math.floor(b * RAMP.length));
+    const d = size * K * f * 1.6;
+    ctx.globalAlpha = Math.min(1, .15 + b);
+    ctx.drawImage(isName ? NAME_ATLAS : ATLAS[o.kind], idx * CELL, 0, CELL, CELL, sx - d/2, sy2 - d/2, d, d);
+    letters++;
+    if (o.kind === GEM) o.sx = sx, o.sy = sy2, o.f = f;
+  }
+  ctx.globalAlpha = 1;
+  // star-shaped glints on the brightest facets
+  ctx.strokeStyle = "rgba(220,235,255,.45)"; ctx.lineWidth = 1; ctx.beginPath();
+  for (const o of flares) {
+    const L = 16 * K * o.f;
+    ctx.moveTo(o.sx - L, o.sy); ctx.lineTo(o.sx + L, o.sy);
+    ctx.moveTo(o.sx, o.sy - L * 1.6); ctx.lineTo(o.sx, o.sy + L * 1.6);
+  }
+  ctx.stroke();
+  hud(t, yaw);
+  requestAnimationFrame(frame);
+}
+
+// ───────── 4. Readout and replay ─────────
+const $time = document.getElementById("time"), $info = document.getElementById("info"), $st = document.getElementById("st");
+let hudAt = 0;
+function hud(t, yaw) {
+  if (performance.now() - hudAt < 100) return; hudAt = performance.now();
+  $time.textContent = "t " + t.toFixed(2) + "s";
+  $info.innerHTML = "for " + NAME_TEXT + " · 2026<br>rotation " + ((yaw * 180 / Math.PI) % 360).toFixed(0).padStart(3, "0") + "°<br>letters " +
+    letters.toLocaleString() + "<br>glints " + pts.filter(o => o.kind === DUST).length;
+  $st.innerHTML = "running · <b>" + Math.round(fps) + " fps</b>";
+}
+document.getElementById("stage").addEventListener("pointerdown", () => { t0 = performance.now(); });  // tap to redraw
+requestAnimationFrame(frame);
+
+// ───────── 5. The typing panel reads this very script and types it out ─────────
+const src = document.getElementById("main").textContent.trim();
+const $code = document.getElementById("code");
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+let typed = still ? src.length : 0, shown = -1;
+function paint() {
+  const rows = Math.max(4, Math.floor($code.clientHeight / 20));
+  const lines = src.slice(0, Math.floor(typed)).split("\n");
+  const first = Math.max(0, lines.length - rows + 1);
+  $code.innerHTML = lines.slice(first).map((l, i, a) => {
+    const c = l.indexOf("//"), body = c < 0 ? esc(l) : esc(l.slice(0, c)) + '<span class="cm">' + esc(l.slice(c)) + "</span>";
+    const cur = i === a.length - 1;
+    return '<span class="ln' + (cur ? " hl" : "") + '" data-n="' + (first + i + 1) + '">' + body + (cur ? '<i class="cur"></i>' : "") + "</span>";
+  }).join("");
+}
+let tick = performance.now();
+(function type(now) {
+  typed = Math.min(src.length, typed + (now - tick) / 1000 * 70); tick = now;
+  if (Math.floor(typed) !== shown) { shown = Math.floor(typed); paint(); }
+  requestAnimationFrame(type);
+})(tick);
+</script>
